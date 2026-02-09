@@ -96,32 +96,186 @@ class UserController extends Controller
 //     }
 // }
 
-    public function index()
-    {
-        try {
-            $paginator = User::query()
-                ->with(['roles:id,name,slug'])
-                ->orderByDesc('id')
-                ->paginate(20);
+    // public function index()
+    // {
+    //     try {
+    //         $paginator = User::query()
+    //             ->with(['roles:id,name,slug'])
+    //             ->orderByDesc('id')
+    //             ->paginate(20);
 
-            return response()->json([
-                'success' => true,
-                'message' => 'Users retrieved successfully.',
-                'data' => $paginator,
-            ], 200);
-        } catch (Throwable $e) {
-            Log::error('UserController@index failed', [
-                'exception' => $e->getMessage(),
-            ]);
+    //         return response()->json([
+    //             'success' => true,
+    //             'message' => 'Users retrieved successfully.',
+    //             'data' => $paginator,
+    //         ], 200);
+    //     } catch (Throwable $e) {
+    //         Log::error('UserController@index failed', [
+    //             'exception' => $e->getMessage(),
+    //         ]);
 
-            return response()->json([
-                'success' => false,
-                'message' => 'Unable to retrieve users at this time.',
-                'data' => null,
-                'error' => config('app.debug') ? ['exception' => $e->getMessage()] : null,
-            ], 500);
+    //         return response()->json([
+    //             'success' => false,
+    //             'message' => 'Unable to retrieve users at this time.',
+    //             'data' => null,
+    //             'error' => config('app.debug') ? ['exception' => $e->getMessage()] : null,
+    //         ], 500);
+    //     }
+    // }
+//     public function index(Request $request)
+// {
+//     try {
+//         $query = User::query()
+//             ->select(['id','name','email','email_verified_at','created_at','updated_at','deleted_at'])
+//             ->with(['roles:id,name,slug'])
+//             ->orderByDesc('id');
+
+//         if ($request->boolean('only_trashed')) {
+//             $query->onlyTrashed();
+//         } elseif ($request->boolean('with_trashed')) {
+//             $query->withTrashed();
+//         }
+
+//         if ($q = $request->query('q')) {
+//             $query->where(function ($b) use ($q) {
+//                 $b->where('name', 'like', "%{$q}%")
+//                   ->orWhere('email', 'like', "%{$q}%");
+//             });
+//         }
+
+//         $paginator = $query->paginate(20)->appends($request->query());
+
+//         return response()->json([
+//             'success' => true,
+//             'message' => 'Users retrieved successfully.',
+//             'data' => $paginator,
+//         ], 200);
+
+//     } catch (Throwable $e) {
+//         Log::error('UserController@index failed', [
+//             'exception' => $e->getMessage(),
+//         ]);
+
+//         return response()->json([
+//             'success' => false,
+//             'message' => 'Unable to retrieve users at this time.',
+//             'data' => null,
+//             'error' => config('app.debug') ? ['exception' => $e->getMessage()] : null,
+//         ], 500);
+//     }
+// }
+
+    public function index(UserIndexRequest $request)
+{
+    $filters = $request->validated();
+
+    try {
+        $page = (int) ($filters['page'] ?? 1);
+        $limit = (int) ($filters['per_page'] ?? 20);
+        $q = $filters['q'] ?? null;
+        $roleSlug = $filters['role'] ?? null;
+
+        $query = User::query()
+            ->select(['id','name','email','email_verified_at','created_at','updated_at','deleted_at'])
+            ->with(['roles:id,name,slug']);
+
+        // Soft delete filters
+        if ($request->boolean('only_trashed')) {
+            $query->onlyTrashed();
+        } elseif ($request->boolean('with_trashed')) {
+            $query->withTrashed();
         }
+
+        // Search (name/email)
+        if ($q) {
+            $query->where(function (Builder $b) use ($q) {
+                $b->where('name', 'like', "%{$q}%")
+                  ->orWhere('email', 'like', "%{$q}%");
+            });
+        }
+
+        // Role filter (by slug)
+        if ($roleSlug) {
+            $query->whereHas('roles', function (Builder $b) use ($roleSlug) {
+                $b->where('slug', $roleSlug);
+            });
+        }
+
+        // Suspended filter (active suspensions in user_suspensions)
+        if (!is_null($filters['suspended'] ?? null)) {
+            $wantSuspended = $request->boolean('suspended');
+
+            if ($wantSuspended) {
+                $query->whereHas('suspensions', function (Builder $b) {
+                    $b->where(function ($q) {
+                        $q->whereNull('suspended_until')
+                          ->orWhere('suspended_until', '>', now());
+                    });
+                });
+            } else {
+                $query->whereDoesntHave('suspensions', function (Builder $b) {
+                    $b->where(function ($q) {
+                        $q->whereNull('suspended_until')
+                          ->orWhere('suspended_until', '>', now());
+                    });
+                });
+            }
+        }
+
+        $paginator = $query
+            ->orderByDesc('id')
+            ->paginate($limit, ['*'], 'page', $page);
+
+        // Transform rows (keep it simple for AG-Grid)
+        $rows = collect($paginator->items())->map(function (User $u) {
+            return [
+                'id' => $u->id,
+                'name' => $u->name,
+                'email' => $u->email,
+                'email_verified_at' => $u->email_verified_at,
+                'created_at' => $u->created_at,
+                'updated_at' => $u->updated_at,
+                'deleted_at' => $u->deleted_at,
+                'is_suspended' => method_exists($u, 'isSuspended') ? $u->isSuspended() : false,
+                'roles' => $u->roles->map(fn ($r) => [
+                    'id' => $r->id,
+                    'name' => $r->name,
+                    'slug' => $r->slug,
+                ])->values(),
+            ];
+        })->values();
+
+        return response()->json([
+            'success' => true,
+            'message' => 'User list fetched successfully.',
+            'data' => $rows,
+            'meta' => [
+                'total' => $paginator->total(),
+                'page' => $paginator->currentPage(),
+                'limit' => $paginator->perPage(),
+            ],
+        ], 200);
+
+    } catch (Throwable $e) {
+        Log::error('UserController@index failed', [
+            'filters' => $filters,
+            'exception' => $e->getMessage(),
+        ]);
+
+        return response()->json([
+            'success' => false,
+            'message' => 'Failed to fetch user list.',
+            'data' => [],
+            'meta' => [
+                'total' => 0,
+                'page' => (int) ($filters['page'] ?? 1),
+                'limit' => (int) ($filters['per_page'] ?? 20),
+            ],
+            'error' => config('app.debug') ? ['exception' => $e->getMessage()] : null,
+        ], 500);
     }
+}
+
 
     /**
      * Public or Admin: create user (registration-like).

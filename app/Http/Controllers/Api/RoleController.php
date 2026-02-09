@@ -10,16 +10,46 @@ use App\Models\Role;
 use Illuminate\Http\Request;
 use App\Http\Requests\RoleIndexRequest;
 use Illuminate\Database\Eloquent\Builder;
+use Throwable;
+use Illuminate\Support\Facades\Log;
 class RoleController extends Controller
 {
+    // public function index()
+    // {
+    //     return Role::query()
+    //         ->withCount('users')
+    //         ->withCount('privileges')
+    //         ->orderBy('id', 'desc')
+    //         ->paginate(20);
+    // }
+
     public function index()
     {
-        return Role::query()
-            ->withCount('users')
-            ->withCount('privileges')
-            ->orderBy('id', 'desc')
-            ->paginate(20);
+        try {
+            $paginator = Role::query()
+                ->withCount('users')
+                ->withCount('privileges')
+                ->orderByDesc('id')
+                ->paginate(20);
+
+            return response()->json([
+                'success' => true,
+                'message' => 'Roles retrieved successfully.',
+                'data' => $paginator,
+            ], 200);
+
+        } catch (Throwable $e) {
+            log::error('RoleController@index failed', ['exception' => $e->getMessage()]);
+
+            return response()->json([
+                'success' => false,
+                'message' => 'Unable to retrieve roles at this time.',
+                'data' => null,
+                'error' => config('app.debug') ? ['exception' => $e->getMessage()] : null,
+            ], 500);
+        }
     }
+
 
     // in future we need this please so don't delete it
 //      public function index(RoleIndexRequest $request)
@@ -61,10 +91,37 @@ class RoleController extends Controller
 // }
 
     public function store(RoleStoreRequest $request)
-    {
-        $role = Role::create($request->validated());
-        return response()->json($role, 201);
+{
+    $data = $request->validated();
+
+    try {
+        $role = Role::create($data);
+
+        if (class_exists(\App\Support\Audit::class)) {
+            \App\Support\Audit::log('roles.create', $role, $data);
+        }
+
+        return response()->json([
+            'success' => true,
+            'message' => 'Role created successfully.',
+            'data' => ['role' => $role],
+        ], 201);
+
+    } catch (Throwable $e) {
+        Log::error('RoleController@store failed', [
+            'data' => $data,
+            'exception' => $e->getMessage(),
+        ]);
+
+        return response()->json([
+            'success' => false,
+            'message' => 'Unable to create role at this time.',
+            'data' => null,
+            'error' => config('app.debug') ? ['exception' => $e->getMessage()] : null,
+        ], 500);
     }
+}
+
 
     public function show(Role $role)
     {
@@ -73,22 +130,47 @@ class RoleController extends Controller
     }
 
     public function update(RoleUpdateRequest $request, Role $role, RoleGuard $guard)
-    {
-        // Prevent modifications to protected roles (slug-based and flag-based)
+{
+    $data = $request->validated();
+
+    try {
         $guard->ensureNotProtected($role);
 
-        $role->update($request->validated());
+        $role->update($data);
 
-        // Flush cache for users of this role (Module 3 method)
         if (method_exists($role, 'flushUsersRbacCache')) {
             $role->flushUsersRbacCache();
         }
 
-        return response()->json($role);
+        if (class_exists(\App\Support\Audit::class)) {
+            \App\Support\Audit::log('roles.update', $role, $data);
+        }
+
+        return response()->json([
+            'success' => true,
+            'message' => 'Role updated successfully.',
+            'data' => ['role' => $role->fresh()],
+        ], 200);
+
+    } catch (Throwable $e) {
+        Log::error('RoleController@update failed', [
+            'role_id' => $role->id,
+            'exception' => $e->getMessage(),
+        ]);
+
+        return response()->json([
+            'success' => false,
+            'message' => 'Unable to update role at this time.',
+            'data' => null,
+            'error' => config('app.debug') ? ['exception' => $e->getMessage()] : null,
+        ], 500);
     }
+}
+
 
     public function destroy(Role $role, RoleGuard $guard)
-    {
+{
+    try {
         $guard->ensureNotProtected($role);
 
         if (method_exists($role, 'flushUsersRbacCache')) {
@@ -97,6 +179,29 @@ class RoleController extends Controller
 
         $role->delete();
 
-        return response()->json(['message' => 'Role deleted.']);
+        if (class_exists(\App\Support\Audit::class)) {
+            \App\Support\Audit::log('roles.delete', $role);
+        }
+
+        return response()->json([
+            'success' => true,
+            'message' => 'Role deleted successfully.',
+            'data' => null,
+        ], 200);
+
+    } catch (Throwable $e) {
+        Log::error('RoleController@destroy failed', [
+            'role_id' => $role->id,
+            'exception' => $e->getMessage(),
+        ]);
+
+        return response()->json([
+            'success' => false,
+            'message' => 'Unable to delete role at this time.',
+            'data' => null,
+            'error' => config('app.debug') ? ['exception' => $e->getMessage()] : null,
+        ], 500);
     }
+}
+
 }
